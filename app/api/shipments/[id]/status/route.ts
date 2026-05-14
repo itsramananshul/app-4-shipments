@@ -1,6 +1,7 @@
 import { authenticate } from "@/lib/authenticate";
 import {
   errorResponse,
+  optionsResponse,
   parseStatusUpdate,
   readJsonBody,
   runMutation,
@@ -23,3 +24,5 @@ export async function PATCH(
     updateStatus(params.id, parsed.value.status, parsed.value.delayReason),
   );
 }
+
+export const OPTIONS = optionsResponse;

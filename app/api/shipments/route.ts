@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { authenticate } from "@/lib/authenticate";
 import {
+  CORS_HEADERS,
   errorResponse,
+  optionsResponse,
   parseNewShipment,
   readJsonBody,
   runMutation,
@@ -19,7 +21,7 @@ export async function GET(request: Request) {
   if (authError) return authError;
   try {
     const shipments = await listShipments();
-    return NextResponse.json(shipments);
+    return NextResponse.json(shipments, { headers: CORS_HEADERS });
   } catch (e) {
     if (e instanceof StoreError) {
       return errorResponse(500, e.message || "Failed to load shipments");
@@ -40,3 +42,5 @@ export async function POST(request: Request) {
   if (!parsed.ok) return errorResponse(parsed.status, parsed.message);
   return runMutation(() => createShipment(parsed.value));
 }
+
+export const OPTIONS = optionsResponse;

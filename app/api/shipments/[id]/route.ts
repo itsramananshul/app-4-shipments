@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { authenticate } from "@/lib/authenticate";
-import { errorResponse } from "@/lib/api-helpers";
+import { CORS_HEADERS, errorResponse, optionsResponse } from "@/lib/api-helpers";
 import { StoreError, getShipment } from "@/lib/shipments-store";
 
 export const dynamic = "force-dynamic";
@@ -14,7 +14,7 @@ export async function GET(
   try {
     const shipment = await getShipment(params.id);
     if (!shipment) return errorResponse(404, "Shipment not found");
-    return NextResponse.json(shipment);
+    return NextResponse.json(shipment, { headers: CORS_HEADERS });
   } catch (e) {
     if (e instanceof StoreError) {
       return errorResponse(500, e.message || "Failed to load shipment");
@@ -25,3 +25,5 @@ export async function GET(
     );
   }
 }
+
+export const OPTIONS = optionsResponse;
