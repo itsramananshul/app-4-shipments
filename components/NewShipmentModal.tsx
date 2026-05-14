@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   CARRIERS,
+  SHIPMENT_STATUSES,
   type Carrier,
   type NewShipmentInput,
+  type ShipmentStatus,
 } from "@/lib/types";
 
 interface NewShipmentModalProps {
@@ -24,20 +26,34 @@ interface FormState {
   order_ref: string;
   items_count: string;
   weight_kg: string;
+  status: ShipmentStatus;
   estimated_arrival: string;
   notes: string;
 }
 
-function todayISO(): string {
+function todayPlus7ISO(): string {
   const d = new Date();
+  d.setDate(d.getDate() + 7);
   const yyyy = d.getFullYear();
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
 }
 
+function defaultTracking(): string {
+  return `SHIP-${Date.now().toString(36).toUpperCase()}`;
+}
+
+const STATUS_LABELS: Record<ShipmentStatus, string> = {
+  PREPARING: "Preparing",
+  IN_TRANSIT: "In Transit",
+  OUT_FOR_DELIVERY: "Out for Delivery",
+  DELIVERED: "Delivered",
+  DELAYED: "Delayed",
+};
+
 const emptyForm = (): FormState => ({
-  tracking_number: "",
+  tracking_number: defaultTracking(),
   carrier: CARRIERS[0],
   origin: "",
   destination: "",
@@ -45,14 +61,15 @@ const emptyForm = (): FormState => ({
   order_ref: "",
   items_count: "1",
   weight_kg: "0",
-  estimated_arrival: todayISO(),
+  status: "PREPARING",
+  estimated_arrival: todayPlus7ISO(),
   notes: "",
 });
 
 const inputClass =
-  "w-full rounded-lg border-0 bg-slate-800 px-3 py-2 text-sm text-slate-100 ring-1 ring-inset ring-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-500 disabled:opacity-60";
+  "mt-2 w-full rounded-lg border-0 bg-gray-50 px-3 py-2 text-sm text-gray-900 ring-1 ring-inset ring-gray-200 focus:outline-none focus:ring-2 focus:ring-teal-500 disabled:opacity-60";
 
-const labelText = "text-xs font-medium uppercase tracking-wider text-slate-400";
+const labelText = "text-xs font-medium uppercase tracking-wider text-gray-500";
 
 export function NewShipmentModal({
   open,
@@ -63,13 +80,24 @@ export function NewShipmentModal({
 }: NewShipmentModalProps) {
   const [form, setForm] = useState<FormState>(emptyForm);
   const [touched, setTouched] = useState(false);
+  const firstInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (open) {
       setForm(emptyForm());
       setTouched(false);
+      requestAnimationFrame(() => firstInputRef.current?.focus());
     }
   }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) onCancel();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, busy, onCancel]);
 
   if (!open) return null;
 
@@ -94,16 +122,20 @@ export function NewShipmentModal({
     <div
       role="dialog"
       aria-modal="true"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm"
+      aria-labelledby="new-shipment-title"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/30 p-4 backdrop-blur-sm"
       onClick={(e) => {
         if (e.target === e.currentTarget && !busy) onCancel();
       }}
     >
-      <div className="w-full max-w-2xl rounded-xl bg-slate-900 p-6 shadow-2xl ring-1 ring-slate-700">
-        <h2 className="text-lg font-semibold text-slate-100">
+      <div className="w-full max-w-2xl rounded-xl bg-white p-6 shadow-2xl ring-1 ring-gray-100">
+        <h2
+          id="new-shipment-title"
+          className="text-lg font-semibold text-gray-900"
+        >
           Create new shipment
         </h2>
-        <p className="mt-1 text-sm text-slate-400">
+        <p className="mt-1 text-sm text-gray-500">
           Shipment is scoped to the current instance. New shipments start in
           PREPARING.
         </p>
@@ -129,18 +161,19 @@ export function NewShipmentModal({
           }}
         >
           <label className="block">
-            <span className={labelText}>Tracking Number</span>
+            <span className={labelText}>Tracking number</span>
             <input
+              ref={firstInputRef}
               className={inputClass}
               value={form.tracking_number}
               onChange={(e) =>
                 setForm((s) => ({ ...s, tracking_number: e.target.value }))
               }
               disabled={busy}
-              placeholder="TRK-F1-9999"
+              placeholder="SHIP-XXXXXX"
             />
             {touched && errors.tracking_number ? (
-              <span className="mt-1 block text-xs text-rose-300">
+              <span className="mt-1 block text-xs text-rose-600">
                 {errors.tracking_number}
               </span>
             ) : null}
@@ -176,7 +209,7 @@ export function NewShipmentModal({
               placeholder="City, ST"
             />
             {touched && errors.origin ? (
-              <span className="mt-1 block text-xs text-rose-300">
+              <span className="mt-1 block text-xs text-rose-600">
                 {errors.origin}
               </span>
             ) : null}
@@ -194,7 +227,7 @@ export function NewShipmentModal({
               placeholder="City, ST"
             />
             {touched && errors.destination ? (
-              <span className="mt-1 block text-xs text-rose-300">
+              <span className="mt-1 block text-xs text-rose-600">
                 {errors.destination}
               </span>
             ) : null}
@@ -211,14 +244,14 @@ export function NewShipmentModal({
               disabled={busy}
             />
             {touched && errors.customer ? (
-              <span className="mt-1 block text-xs text-rose-300">
+              <span className="mt-1 block text-xs text-rose-600">
                 {errors.customer}
               </span>
             ) : null}
           </label>
 
           <label className="block">
-            <span className={labelText}>Order Ref</span>
+            <span className={labelText}>Order reference</span>
             <input
               className={inputClass}
               value={form.order_ref}
@@ -226,17 +259,17 @@ export function NewShipmentModal({
                 setForm((s) => ({ ...s, order_ref: e.target.value }))
               }
               disabled={busy}
-              placeholder="ORD-F1-001"
+              placeholder="ORD-001"
             />
             {touched && errors.order_ref ? (
-              <span className="mt-1 block text-xs text-rose-300">
+              <span className="mt-1 block text-xs text-rose-600">
                 {errors.order_ref}
               </span>
             ) : null}
           </label>
 
           <label className="block">
-            <span className={labelText}>Items Count</span>
+            <span className={labelText}>Items count</span>
             <input
               className={inputClass}
               type="number"
@@ -249,7 +282,7 @@ export function NewShipmentModal({
               disabled={busy}
             />
             {touched && errors.items_count ? (
-              <span className="mt-1 block text-xs text-rose-300">
+              <span className="mt-1 block text-xs text-rose-600">
                 {errors.items_count}
               </span>
             ) : null}
@@ -261,7 +294,7 @@ export function NewShipmentModal({
               className={inputClass}
               type="number"
               min={0}
-              step="0.01"
+              step={0.1}
               value={form.weight_kg}
               onChange={(e) =>
                 setForm((s) => ({ ...s, weight_kg: e.target.value }))
@@ -269,14 +302,38 @@ export function NewShipmentModal({
               disabled={busy}
             />
             {touched && errors.weight_kg ? (
-              <span className="mt-1 block text-xs text-rose-300">
+              <span className="mt-1 block text-xs text-rose-600">
                 {errors.weight_kg}
               </span>
             ) : null}
           </label>
 
-          <label className="block sm:col-span-2">
-            <span className={labelText}>Estimated Arrival</span>
+          <label className="block">
+            <span className={labelText}>Status</span>
+            <select
+              className={inputClass}
+              value={form.status}
+              onChange={(e) =>
+                setForm((s) => ({
+                  ...s,
+                  status: e.target.value as ShipmentStatus,
+                }))
+              }
+              disabled={busy}
+            >
+              {SHIPMENT_STATUSES.map((st) => (
+                <option key={st} value={st}>
+                  {STATUS_LABELS[st]}
+                </option>
+              ))}
+            </select>
+            <span className="mt-1 block text-[11px] text-gray-400">
+              New shipments start in PREPARING server-side.
+            </span>
+          </label>
+
+          <label className="block">
+            <span className={labelText}>Estimated arrival</span>
             <input
               className={inputClass}
               type="date"
@@ -287,7 +344,7 @@ export function NewShipmentModal({
               disabled={busy}
             />
             {touched && errors.estimated_arrival ? (
-              <span className="mt-1 block text-xs text-rose-300">
+              <span className="mt-1 block text-xs text-rose-600">
                 {errors.estimated_arrival}
               </span>
             ) : null}
@@ -307,7 +364,7 @@ export function NewShipmentModal({
           </label>
 
           {errorMessage ? (
-            <p className="sm:col-span-2 rounded-md bg-rose-500/10 px-3 py-2 text-sm text-rose-300 ring-1 ring-inset ring-rose-500/30">
+            <p className="sm:col-span-2 rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-700 ring-1 ring-inset ring-rose-200">
               {errorMessage}
             </p>
           ) : null}
@@ -317,14 +374,14 @@ export function NewShipmentModal({
               type="button"
               onClick={onCancel}
               disabled={busy}
-              className="rounded-lg px-3 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800 disabled:opacity-60"
+              className="rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-300 disabled:opacity-60"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={busy || (touched && !isValid)}
-              className="rounded-lg bg-sky-500 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-sky-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 disabled:cursor-not-allowed disabled:opacity-60"
+              className="rounded-lg bg-teal-500 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-teal-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-400 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {busy ? "Creating…" : "Create shipment"}
             </button>

@@ -6,65 +6,85 @@ import type {
   Shipment,
   ShipmentStatus,
 } from "@/lib/types";
-import {
-  ActivityFeed,
-  type ActivityAction,
-  type ActivityEntry,
-} from "./ActivityFeed";
+import { ActiveShipments, type StatusTransition } from "./ActiveShipments";
+import { ActivityFeed, type ActivityEntry } from "./ActivityFeed";
 import { ApiKeyManager } from "./ApiKeyManager";
-import { ConnectionStatus, type ConnectionState } from "./ConnectionStatus";
-import { FilterBar, type StatusFilter } from "./FilterBar";
+import { ComingSoon } from "./ComingSoon";
+import { DelayedShipments } from "./DelayedShipments";
+import { DonutChart } from "./DonutChart";
+import { FilterDropdown, type StatusFilter } from "./FilterDropdown";
+import { MetricCard } from "./MetricCard";
 import { NewShipmentModal } from "./NewShipmentModal";
-import { NoteModal } from "./NoteModal";
-import { ShipmentsTable, type ShipmentActionKind } from "./ShipmentsTable";
-import { StatCard } from "./StatCard";
-import { StatusModal } from "./StatusModal";
 import { Toast, type ToastState } from "./Toast";
+import { TopNav, type NavView } from "./TopNav";
 
 interface DashboardProps {
   instanceName: string;
 }
 
 const POLL_INTERVAL_MS = 5000;
-const STALE_THRESHOLD_MS = 15000;
 const ACTIVITY_MAX = 50;
-
-type ActionModal =
-  | { kind: "status"; shipment: Shipment }
-  | { kind: "note"; shipment: Shipment }
-  | { kind: "new" }
-  | null;
-
-function todayLocalISO(now: Date): string {
-  const yyyy = now.getFullYear();
-  const mm = String(now.getMonth() + 1).padStart(2, "0");
-  const dd = String(now.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
-}
 
 function newActivityId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+const STATUS_LABEL: Record<ShipmentStatus, string> = {
+  PREPARING: "Preparing",
+  IN_TRANSIT: "In Transit",
+  OUT_FOR_DELIVERY: "Out for Delivery",
+  DELIVERED: "Delivered",
+  DELAYED: "Delayed",
+};
+
+const COMING_SOON_COPY: Record<
+  Exclude<NavView, "dashboard">,
+  { title: string; description: string }
+> = {
+  shipments: {
+    title: "Shipments — coming soon",
+    description:
+      "A dedicated catalog of every shipment with advanced search, bulk updates, and export.",
+  },
+  carriers: {
+    title: "Carriers — coming soon",
+    description:
+      "Carrier scorecards, contracted rates, and SLA tracking across each lane.",
+  },
+  routes: {
+    title: "Routes — coming soon",
+    description:
+      "Lane optimization, on-time performance trends, and route-level cost breakdowns.",
+  },
+  reports: {
+    title: "Reports — coming soon",
+    description:
+      "Schedule and export delivery, delay, and carrier performance reports.",
+  },
+};
+
+function scrollToShipments() {
+  const el = document.getElementById("active-shipments");
+  if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 export function Dashboard({ instanceName }: DashboardProps) {
   const [shipments, setShipments] = useState<Shipment[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const [actionModal, setActionModal] = useState<ActionModal>(null);
-  const [actionBusy, setActionBusy] = useState(false);
-  const [actionError, setActionError] = useState<string | null>(null);
+  const [view, setView] = useState<NavView>("dashboard");
+  const [filter, setFilter] = useState<StatusFilter>("ALL");
+  const [expanded, setExpanded] = useState(false);
 
-  const [lastSuccessAt, setLastSuccessAt] = useState<Date | null>(null);
-  const [lastFetchOk, setLastFetchOk] = useState<boolean>(true);
-  const [now, setNow] = useState<Date>(new Date());
+  const [newOpen, setNewOpen] = useState(false);
+  const [createBusy, setCreateBusy] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+
+  const [busyId, setBusyId] = useState<string | null>(null);
 
   const [toast, setToast] = useState<ToastState | null>(null);
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [apiKeysOpen, setApiKeysOpen] = useState(false);
-
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("ALL");
-  const [search, setSearch] = useState<string>("");
-  const [delayedOnly, setDelayedOnly] = useState<boolean>(false);
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -86,11 +106,8 @@ export function Dashboard({ instanceName }: DashboardProps) {
       const data: Shipment[] = await res.json();
       setShipments(data);
       setLoadError(null);
-      setLastFetchOk(true);
-      setLastSuccessAt(new Date());
     } catch (err) {
       if ((err as { name?: string }).name === "AbortError") return;
-      setLastFetchOk(false);
       setLoadError(
         err instanceof Error ? err.message : "Failed to load shipments",
       );
@@ -99,13 +116,11 @@ export function Dashboard({ instanceName }: DashboardProps) {
 
   useEffect(() => {
     void fetchShipments();
-    const pollId = setInterval(() => {
+    const id = setInterval(() => {
       void fetchShipments();
     }, POLL_INTERVAL_MS);
-    const tickId = setInterval(() => setNow(new Date()), 1000);
     return () => {
-      clearInterval(pollId);
-      clearInterval(tickId);
+      clearInterval(id);
       abortRef.current?.abort();
     };
   }, [fetchShipments]);
@@ -116,392 +131,416 @@ export function Dashboard({ instanceName }: DashboardProps) {
     return () => clearTimeout(id);
   }, [toast]);
 
-  const connectionState: ConnectionState = useMemo(() => {
-    if (!lastSuccessAt) return "connecting";
-    const age = now.getTime() - lastSuccessAt.getTime();
-    if (age > STALE_THRESHOLD_MS) return "stale";
-    if (!lastFetchOk) return "reconnecting";
-    return "live";
-  }, [lastSuccessAt, lastFetchOk, now]);
-
-  const today = useMemo(() => todayLocalISO(now), [now]);
-
   const stats = useMemo(() => {
     const list = shipments ?? [];
-    const totalShipments = list.length;
-    const delayed = list.filter((s) => s.status === "DELAYED").length;
-    const inTransit = list.filter((s) => s.status === "IN_TRANSIT").length;
-    const onTimeDelivered = list.filter(
-      (s) =>
-        s.status === "DELIVERED" &&
-        s.actual_arrival !== null &&
-        s.actual_arrival <= s.estimated_arrival,
+    const total = list.length;
+    const preparing = list.filter((s) => s.status === "PREPARING").length;
+    const inTransitOnly = list.filter((s) => s.status === "IN_TRANSIT").length;
+    const outForDelivery = list.filter(
+      (s) => s.status === "OUT_FOR_DELIVERY",
     ).length;
-    return { totalShipments, delayed, inTransit, onTimeDelivered };
+    const delivered = list.filter((s) => s.status === "DELIVERED").length;
+    const delayed = list.filter((s) => s.status === "DELAYED").length;
+    const inTransitCombined = inTransitOnly + outForDelivery;
+    return {
+      total,
+      preparing,
+      inTransitOnly,
+      outForDelivery,
+      delivered,
+      delayed,
+      inTransitCombined,
+    };
   }, [shipments]);
 
-  const filtered = useMemo(() => {
-    const list = shipments ?? [];
-    const term = search.trim().toLowerCase();
-    return list.filter((s) => {
-      if (statusFilter !== "ALL" && s.status !== statusFilter) return false;
-      if (delayedOnly && s.status !== "DELAYED") return false;
-      if (term) {
-        const hay =
-          `${s.tracking_number} ${s.customer} ${s.order_ref} ${s.carrier} ${s.origin} ${s.destination}`.toLowerCase();
-        if (!hay.includes(term)) return false;
-      }
-      return true;
-    });
-  }, [shipments, statusFilter, search, delayedOnly]);
+  const filterCounts: Record<StatusFilter, number> = useMemo(
+    () => ({
+      ALL: stats.total,
+      PREPARING: stats.preparing,
+      IN_TRANSIT: stats.inTransitOnly,
+      OUT_FOR_DELIVERY: stats.outForDelivery,
+      DELIVERED: stats.delivered,
+      DELAYED: stats.delayed,
+    }),
+    [stats],
+  );
 
   const appendActivity = useCallback((entry: ActivityEntry) => {
     setActivity((prev) => [entry, ...prev].slice(0, ACTIVITY_MAX));
   }, []);
 
-  const handleAction = useCallback(
-    (shipment: Shipment, action: ShipmentActionKind) => {
-      setActionError(null);
-      setActionModal({ kind: action, shipment });
+  const showToast = useCallback(
+    (kind: "success" | "error", message: string) => {
+      setToast({ id: Date.now(), kind, message });
     },
     [],
   );
 
-  const handleCloseModal = useCallback(() => {
-    if (actionBusy) return;
-    setActionModal(null);
-    setActionError(null);
-  }, [actionBusy]);
-
-  const handleResetFilters = useCallback(() => {
-    setStatusFilter("ALL");
-    setSearch("");
-    setDelayedOnly(false);
-  }, []);
-
-  const submitMutation = useCallback(
-    async (params: {
-      url: string;
-      method: "POST" | "PATCH";
-      body: unknown;
-      action: ActivityAction;
-      trackingNumber: string;
-      customer: string;
-      detail: string;
-      successMessage: string;
-      failurePrefix: string;
-    }) => {
-      setActionBusy(true);
-      setActionError(null);
+  const performStatusChange = useCallback(
+    async (
+      shipment: Shipment,
+      nextStatus: ShipmentStatus,
+      delayReason?: string,
+    ) => {
+      setBusyId(shipment.id);
       try {
-        const res = await fetch(params.url, {
-          method: params.method,
+        const body: { status: ShipmentStatus; delayReason?: string } = {
+          status: nextStatus,
+        };
+        if (delayReason !== undefined) body.delayReason = delayReason;
+
+        const res = await fetch(`/api/shipments/${shipment.id}/status`, {
+          method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(params.body),
+          body: JSON.stringify(body),
         });
-        const body = (await res.json().catch(() => null)) as
+        const data = (await res.json().catch(() => null)) as
           | { success?: boolean; error?: string; shipment?: Shipment }
           | null;
-        const ok = res.ok && body?.success === true;
+        const ok = res.ok && data?.success === true;
         if (!ok) {
-          throw new Error(body?.error ?? `Request failed (HTTP ${res.status})`);
+          throw new Error(data?.error ?? `Request failed (HTTP ${res.status})`);
         }
-
+        const activityAction =
+          nextStatus === "DELAYED" ? "delayed" : "status_change";
         appendActivity({
           id: newActivityId(),
           timestamp: new Date(),
-          action: params.action,
-          trackingNumber: params.trackingNumber,
-          customer: params.customer,
-          detail: params.detail,
+          action: activityAction,
+          trackingNumber: shipment.tracking_number,
+          customer: shipment.customer,
+          detail:
+            nextStatus === "DELAYED" && delayReason
+              ? `${STATUS_LABEL[shipment.status]} → ${STATUS_LABEL[nextStatus]} (${delayReason})`
+              : `${STATUS_LABEL[shipment.status]} → ${STATUS_LABEL[nextStatus]}`,
           result: "success",
         });
-        setToast({
-          id: Date.now(),
-          kind: "success",
-          message: params.successMessage,
-        });
-        setActionModal(null);
+        showToast(
+          "success",
+          `${shipment.tracking_number} → ${STATUS_LABEL[nextStatus]}`,
+        );
         void fetchShipments();
       } catch (err) {
         const message = err instanceof Error ? err.message : "Action failed";
         appendActivity({
           id: newActivityId(),
           timestamp: new Date(),
-          action: params.action,
-          trackingNumber: params.trackingNumber,
-          customer: params.customer,
-          detail: params.detail,
+          action:
+            nextStatus === "DELAYED" ? "delayed" : "status_change",
+          trackingNumber: shipment.tracking_number,
+          customer: shipment.customer,
+          detail: `${STATUS_LABEL[shipment.status]} → ${STATUS_LABEL[nextStatus]}`,
           result: "failure",
           message,
         });
-        setActionError(message);
-        setToast({
-          id: Date.now(),
-          kind: "error",
-          message: `${params.failurePrefix}: ${message}`,
-        });
+        showToast("error", `Status change failed: ${message}`);
       } finally {
-        setActionBusy(false);
+        setBusyId(null);
       }
     },
-    [appendActivity, fetchShipments],
+    [appendActivity, fetchShipments, showToast],
   );
 
-  const handleStatusSubmit = useCallback(
-    (newStatus: ShipmentStatus, delayReason?: string) => {
-      if (actionModal?.kind !== "status") return;
-      const s = actionModal.shipment;
-      const body: { status: ShipmentStatus; delayReason?: string } = {
-        status: newStatus,
-      };
-      if (delayReason !== undefined) body.delayReason = delayReason;
-      void submitMutation({
-        url: `/api/shipments/${s.id}/status`,
-        method: "PATCH",
-        body,
-        action: "status_change",
-        trackingNumber: s.tracking_number,
-        customer: s.customer,
-        detail:
-          newStatus === "DELAYED" && delayReason
-            ? `${s.status} → ${newStatus} (${delayReason})`
-            : `${s.status} → ${newStatus}`,
-        successMessage: `${s.tracking_number} → ${newStatus.replace(/_/g, " ")}`,
-        failurePrefix: "Status change failed",
-      });
+  const handleTransition = useCallback(
+    (shipment: Shipment, transition: StatusTransition) => {
+      if (busyId) return;
+      if (transition.kind === "advance") {
+        void performStatusChange(shipment, transition.to);
+        return;
+      }
+      if (transition.kind === "delay") {
+        const reason =
+          typeof window !== "undefined"
+            ? window.prompt(
+                `Reason for delaying ${shipment.tracking_number}?`,
+                shipment.delay_reason || "",
+              )
+            : null;
+        if (reason === null) return;
+        const trimmed = reason.trim();
+        if (!trimmed) {
+          showToast("error", "A delay reason is required.");
+          return;
+        }
+        void performStatusChange(shipment, "DELAYED", trimmed);
+        return;
+      }
+      // resume
+      void performStatusChange(shipment, "IN_TRANSIT");
     },
-    [actionModal, submitMutation],
+    [busyId, performStatusChange, showToast],
   );
 
-  const handleNoteSubmit = useCallback(
-    (note: string) => {
-      if (actionModal?.kind !== "note") return;
-      const s = actionModal.shipment;
-      void submitMutation({
-        url: `/api/shipments/${s.id}/note`,
-        method: "POST",
-        body: { note },
-        action: "note_added",
-        trackingNumber: s.tracking_number,
-        customer: s.customer,
-        detail:
-          note.length > 50 ? `note: ${note.slice(0, 50)}…` : `note: ${note}`,
-        successMessage: `Note added to ${s.tracking_number}`,
-        failurePrefix: "Note failed",
-      });
+  const handleResume = useCallback(
+    (shipment: Shipment) => {
+      handleTransition(shipment, { kind: "resume" });
     },
-    [actionModal, submitMutation],
+    [handleTransition],
   );
 
   const handleNewShipmentSubmit = useCallback(
-    (input: NewShipmentInput) => {
-      void submitMutation({
-        url: "/api/shipments",
-        method: "POST",
-        body: input,
-        action: "create",
-        trackingNumber: input.tracking_number,
-        customer: input.customer,
-        detail: `${input.carrier} · ${input.items_count} items`,
-        successMessage: `Created shipment ${input.tracking_number}`,
-        failurePrefix: "Create failed",
-      });
+    async (input: NewShipmentInput) => {
+      setCreateBusy(true);
+      setCreateError(null);
+      try {
+        const res = await fetch("/api/shipments", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(input),
+        });
+        const data = (await res.json().catch(() => null)) as
+          | { success?: boolean; error?: string; shipment?: Shipment }
+          | null;
+        const ok = res.ok && data?.success === true;
+        if (!ok) {
+          throw new Error(data?.error ?? `Request failed (HTTP ${res.status})`);
+        }
+        appendActivity({
+          id: newActivityId(),
+          timestamp: new Date(),
+          action: "created",
+          trackingNumber: input.tracking_number,
+          customer: input.customer,
+          detail: `${input.carrier} · ${input.items_count} items`,
+          result: "success",
+        });
+        showToast("success", `Created shipment ${input.tracking_number}`);
+        setNewOpen(false);
+        void fetchShipments();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Create failed";
+        appendActivity({
+          id: newActivityId(),
+          timestamp: new Date(),
+          action: "created",
+          trackingNumber: input.tracking_number,
+          customer: input.customer,
+          detail: `${input.carrier} · ${input.items_count} items`,
+          result: "failure",
+          message,
+        });
+        setCreateError(message);
+        showToast("error", `Create failed: ${message}`);
+      } finally {
+        setCreateBusy(false);
+      }
     },
-    [submitMutation],
+    [appendActivity, fetchShipments, showToast],
   );
 
-  const lastRefreshedAgo = useMemo(() => {
-    if (!lastSuccessAt) return null;
-    return Math.max(
-      0,
-      Math.floor((now.getTime() - lastSuccessAt.getTime()) / 1000),
-    );
-  }, [lastSuccessAt, now]);
+  const handleViewDelayed = useCallback(() => {
+    setFilter("DELAYED");
+    setExpanded(true);
+    setTimeout(scrollToShipments, 50);
+  }, []);
+
+  const handleViewInTransit = useCallback(() => {
+    setFilter("IN_TRANSIT");
+    setExpanded(true);
+    setTimeout(scrollToShipments, 50);
+  }, []);
+
+  const handleViewDelivered = useCallback(() => {
+    setFilter("DELIVERED");
+    setExpanded(true);
+    setTimeout(scrollToShipments, 50);
+  }, []);
+
+  const handleViewAll = useCallback(() => {
+    setFilter("ALL");
+    setExpanded(true);
+    setTimeout(scrollToShipments, 50);
+  }, []);
 
   return (
-    <main className="mx-auto max-w-[1400px] px-6 py-8">
-      <header className="flex flex-col gap-4 border-b border-slate-800 pb-6">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-teal-400">
-              Shipments Tracker
-            </p>
-            <h1 className="mt-1 text-3xl font-semibold text-slate-50">
-              {instanceName}{" "}
-              <span className="text-slate-500">— Shipments Tracker</span>
-            </h1>
-            <p className="mt-1 text-sm text-slate-400">
-              Standalone shipments instance. Auto-refreshes every 5 seconds.
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <span
-              className="inline-flex items-center gap-2 rounded-full bg-slate-800/80 px-3 py-1 text-xs font-medium text-slate-300 ring-1 ring-inset ring-slate-700"
-              title="Set via INSTANCE_NAME env var. Read-only in the UI."
-            >
-              <svg
-                aria-hidden
-                viewBox="0 0 24 24"
-                className="h-3.5 w-3.5 text-slate-500"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-              >
-                <rect x="5" y="11" width="14" height="10" rx="2" />
-                <path d="M8 11V8a4 4 0 1 1 8 0v3" />
-              </svg>
-              Current Instance: {instanceName}
-            </span>
-            <ConnectionStatus state={connectionState} />
-            <button
-              type="button"
-              onClick={() => setApiKeysOpen(true)}
-              className="inline-flex items-center gap-1 rounded-full bg-slate-800/80 px-3 py-1 text-xs font-medium text-slate-200 ring-1 ring-inset ring-slate-700 hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-400"
-            >
-              <span aria-hidden>🔑</span> API Keys
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setActionError(null);
-                setActionModal({ kind: "new" });
-              }}
-              className="inline-flex items-center gap-1 rounded-full bg-teal-500 px-3 py-1 text-xs font-semibold text-white shadow-sm hover:bg-teal-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-400"
-            >
-              + New shipment
-            </button>
-          </div>
-        </div>
+    <div>
+      <TopNav
+        instanceName={instanceName}
+        currentView={view}
+        onChangeView={(v) => {
+          setView(v);
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        }}
+        onOpenApiKeys={() => setApiKeysOpen(true)}
+      />
 
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
-          <span>
-            <span className="text-slate-500">Last refreshed:</span>{" "}
-            <span className="text-slate-300 tabular-nums">
-              {lastSuccessAt ? lastSuccessAt.toLocaleTimeString() : "—"}
-            </span>
-            {lastRefreshedAgo !== null ? (
-              <span className="ml-1 text-slate-500">
-                ({lastRefreshedAgo}s ago)
-              </span>
-            ) : null}
-          </span>
-          <span className="text-slate-700">·</span>
-          <span>
-            Polling every {Math.round(POLL_INTERVAL_MS / 1000)} s · stale after{" "}
-            {Math.round(STALE_THRESHOLD_MS / 1000)} s
-          </span>
-        </div>
-      </header>
-
-      <section className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard label="Total Shipments" value={stats.totalShipments} />
-        <StatCard
-          label="Delayed"
-          value={stats.delayed}
-          tone={stats.delayed > 0 ? "danger" : "default"}
-          hint={
-            stats.delayed > 0
-              ? "Health is degraded while > 0"
-              : "Nothing delayed"
-          }
-        />
-        <StatCard
-          label="In Transit"
-          value={stats.inTransit}
-          tone="info"
-          hint="Currently moving"
-        />
-        <StatCard
-          label="On-Time Delivered"
-          value={stats.onTimeDelivered}
-          tone="success"
-          hint="Delivered ≤ estimated arrival"
-        />
-      </section>
-
-      {loadError ? (
-        <div className="mt-6 rounded-md bg-rose-500/10 px-4 py-3 text-sm text-rose-300 ring-1 ring-inset ring-rose-500/30">
-          Failed to load shipments: {loadError}
-        </div>
-      ) : null}
-
-      <section className="mt-6">
-        <FilterBar
-          statusFilter={statusFilter}
-          search={search}
-          delayedOnly={delayedOnly}
-          onStatusChange={setStatusFilter}
-          onSearchChange={setSearch}
-          onDelayedChange={setDelayedOnly}
-          resultCount={filtered.length}
-          totalCount={shipments?.length ?? 0}
-          onReset={handleResetFilters}
-        />
-      </section>
-
-      <section className="mt-4">
-        {shipments === null && !loadError ? (
-          <div className="rounded-xl bg-slate-900/40 px-4 py-12 text-center text-sm text-slate-500 ring-1 ring-slate-800">
-            Loading shipments…
-          </div>
+      <main className="mx-auto max-w-7xl px-6 py-6">
+        {view !== "dashboard" ? (
+          <>
+            <div className="mb-6 flex flex-col gap-1">
+              <p className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+                {view}
+              </p>
+              <h1 className="text-2xl font-bold capitalize text-gray-900">
+                {view}
+              </h1>
+            </div>
+            <ComingSoon
+              title={COMING_SOON_COPY[view].title}
+              description={COMING_SOON_COPY[view].description}
+              onBack={() => setView("dashboard")}
+            />
+          </>
         ) : (
-          <ShipmentsTable
-            shipments={filtered}
-            today={today}
-            onAction={handleAction}
-          />
+          <>
+            <div className="mb-6 flex items-end justify-between gap-3">
+              <div className="flex flex-col gap-1">
+                <p className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+                  Overview
+                </p>
+                <h1 className="text-2xl font-bold text-gray-900">
+                  {instanceName} Dashboard
+                </h1>
+              </div>
+              <div className="flex items-center gap-2">
+                <FilterDropdown
+                  value={filter}
+                  counts={filterCounts}
+                  onChange={setFilter}
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCreateError(null);
+                    setNewOpen(true);
+                  }}
+                  className="inline-flex items-center gap-1 rounded-lg bg-teal-500 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-teal-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-400"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="h-3.5 w-3.5"
+                    aria-hidden
+                  >
+                    <line x1="12" y1="5" x2="12" y2="19" />
+                    <line x1="5" y1="12" x2="19" y2="12" />
+                  </svg>
+                  New shipment
+                </button>
+              </div>
+            </div>
+
+            {loadError ? (
+              <div className="mb-6 rounded-lg bg-rose-50 px-4 py-3 text-sm text-rose-700 ring-1 ring-inset ring-rose-200">
+                Failed to load shipments: {loadError}
+              </div>
+            ) : null}
+
+            <section className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <MetricCard
+                label="Total Shipments"
+                value={stats.total}
+                onViewDetail={handleViewAll}
+              />
+              <MetricCard
+                label="In Transit"
+                value={stats.inTransitCombined}
+                hint="Includes out for delivery"
+                onViewDetail={handleViewInTransit}
+              />
+              <MetricCard
+                label="Delivered"
+                value={stats.delivered}
+                hint={
+                  stats.delivered > 0 ? "Completed" : "Nothing delivered yet"
+                }
+                onViewDetail={handleViewDelivered}
+              />
+              <MetricCard
+                label="Delayed"
+                value={stats.delayed}
+                hint={
+                  stats.delayed > 0 ? "Needs attention" : "All on schedule"
+                }
+                onViewDetail={handleViewDelayed}
+              />
+            </section>
+
+            <section className="mb-6 grid grid-cols-1 gap-4 lg:grid-cols-5">
+              <div className="lg:col-span-3">
+                <ActiveShipments
+                  shipments={shipments ?? []}
+                  loading={shipments === null}
+                  filter={filter}
+                  expanded={expanded}
+                  busyId={busyId}
+                  onTransition={handleTransition}
+                  onToggleExpand={() => setExpanded((v) => !v)}
+                />
+              </div>
+              <div className="flex flex-col gap-4 lg:col-span-2">
+                <section className="rounded-xl bg-white p-5 shadow-sm ring-1 ring-gray-100">
+                  <header className="mb-4 flex items-center justify-between">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+                        Distribution
+                      </p>
+                      <h2 className="text-lg font-semibold text-gray-900">
+                        Status Breakdown
+                      </h2>
+                    </div>
+                  </header>
+                  <DonutChart
+                    total={stats.total}
+                    centerLabel="Shipments"
+                    slices={[
+                      {
+                        label: "Preparing",
+                        value: stats.preparing,
+                        hex: "#f59e0b",
+                      },
+                      {
+                        label: "In Transit",
+                        value: stats.inTransitOnly,
+                        hex: "#3b82f6",
+                      },
+                      {
+                        label: "Out for Delivery",
+                        value: stats.outForDelivery,
+                        hex: "#6366f1",
+                      },
+                      {
+                        label: "Delivered",
+                        value: stats.delivered,
+                        hex: "#10b981",
+                      },
+                      {
+                        label: "Delayed",
+                        value: stats.delayed,
+                        hex: "#ef4444",
+                      },
+                    ].filter((s) => s.value > 0)}
+                  />
+                </section>
+                <ActivityFeed entries={activity} />
+              </div>
+            </section>
+
+            <section className="mb-6">
+              <DelayedShipments
+                shipments={shipments ?? []}
+                busyId={busyId}
+                onResume={handleResume}
+                onViewAll={handleViewDelayed}
+              />
+            </section>
+          </>
         )}
-      </section>
-
-      <section className="mt-6">
-        <ActivityFeed entries={activity} />
-      </section>
-
-      <StatusModal
-        open={actionModal?.kind === "status"}
-        trackingNumber={
-          actionModal?.kind === "status"
-            ? actionModal.shipment.tracking_number
-            : ""
-        }
-        currentStatus={
-          actionModal?.kind === "status"
-            ? actionModal.shipment.status
-            : "PREPARING"
-        }
-        currentDelayReason={
-          actionModal?.kind === "status"
-            ? actionModal.shipment.delay_reason
-            : ""
-        }
-        busy={actionBusy}
-        errorMessage={actionError}
-        onCancel={handleCloseModal}
-        onSubmit={handleStatusSubmit}
-      />
-
-      <NoteModal
-        open={actionModal?.kind === "note"}
-        trackingNumber={
-          actionModal?.kind === "note"
-            ? actionModal.shipment.tracking_number
-            : ""
-        }
-        existingNotes={
-          actionModal?.kind === "note" ? actionModal.shipment.notes : ""
-        }
-        busy={actionBusy}
-        errorMessage={actionError}
-        onCancel={handleCloseModal}
-        onSubmit={handleNoteSubmit}
-      />
+      </main>
 
       <NewShipmentModal
-        open={actionModal?.kind === "new"}
-        busy={actionBusy}
-        errorMessage={actionError}
-        onCancel={handleCloseModal}
+        open={newOpen}
+        busy={createBusy}
+        errorMessage={createError}
+        onCancel={() => {
+          if (createBusy) return;
+          setNewOpen(false);
+          setCreateError(null);
+        }}
         onSubmit={handleNewShipmentSubmit}
       />
 
@@ -511,6 +550,6 @@ export function Dashboard({ instanceName }: DashboardProps) {
         open={apiKeysOpen}
         onClose={() => setApiKeysOpen(false)}
       />
-    </main>
+    </div>
   );
 }

@@ -1,10 +1,13 @@
 import type { Metadata } from "next";
+import { Inter } from "next/font/google";
 import "./globals.css";
+
+const inter = Inter({ subsets: ["latin"], display: "swap", variable: "--font-inter" });
 
 const instanceName = process.env.NEXT_PUBLIC_INSTANCE_NAME ?? "Instance";
 
 export const metadata: Metadata = {
-  title: `${instanceName} — Shipments Tracker`,
+  title: `${instanceName} — Shipments`,
   description: "Standalone shipments tracking app for the enterprise demo.",
 };
 
@@ -14,8 +17,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
-      <body className="min-h-screen antialiased">{children}</body>
+    <html lang="en" className={inter.variable}>
+      <body className="min-h-screen font-sans antialiased">{children}</body>
     </html>
   );
 }
